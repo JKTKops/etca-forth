@@ -12,16 +12,16 @@ forth:	forth.o
 	cp forth.bin /mnt/c/Users/zergl/AppData/Roaming/godot/app_userdata/Turing\ Complete/schematics/architecture/ETCA/uETCa-v1/
 	rm forth
 
-forth.o:	forth.s
-	$(CPP) forth.s | $(AS) -o forth.o
+forth.o:	forth.S
+	$(CPP) forth.S | $(AS) -o forth.o
 
 #	$(AS) forth.s -o forth.o
 
 annotated:	forth.pre
 	etca-as.py $(ARCH_ARG) $(MODEL) forth.pre -o forth.ann
 
-forth.pre:	forth.s
-	$(CPP) forth.s > forth.pre
+forth.pre:	forth.S
+	$(CPP) forth.S > forth.pre
 
 clean:
 	rm forth forth.ann forth.bin forth.o forth.pre

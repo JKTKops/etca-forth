@@ -300,3 +300,98 @@ main:
         .section .rodata
 cold_start:
         .int 0  ; TODO: should be .int QUIT
+
+/* Defining Built-In Words
+
+Recall the layout of a user-defined word given above (with a bit more precision here).
+
+    previous entry                                        code field of DUP
+     ^                                                     ^
+     |                                                     |
+  +--|---+---+---+---+---+---+---+---+---+-----------+---+-|---+---+------+
+  | LINK | 6 | D | O | U | B | L | E | 0 | call %rd8 | 0 | DUP | + | EXIT |
+  +------+---+---+---+---+---+---+---+---+-----------+---+-----+---+------+
+     ^    len                         pad             pad
+     |                              1 byte          2 bytes
+    LINK in next entry
+
+It's useful to define such words in this file, when something would be difficult or too much
+in assembly. But we can't just write ": DOUBLE DUP + ;" yet, because an ETCa assembler would
+have no clue what that means. Instead, we have to lay it out ourselves. For this entry, that
+would look like this:
+
+        .p2align 2
+        .int <link to previous word>
+        .byte 6
+        .ascii "DOUBLE"
+        .byte 0
+DOUBLE: call ENTER_PIN
+        .p2align 2
+        .int DUP
+        .int PLUS
+        .int EXIT
+
+That's obviously very tedious, so we instead define a macro to create all of the repeated
+stuff for us. We also want a macro for defining _primitive_ words, which are implemented in
+assembly - that simply creates a header and a label, but stops before emitting the call to ENTER.
+
+*/
+
+        ; flags: used to implement compile-time words and smudging
+        .set F_IMMED,0x80
+        .set F_SMUDGE,0x40
+        .set F_LENMASK,0x1F
+
+        ; chain of LINK pointers ends with 0, and will be maintained using the local
+        ; label 1: - this allows each word to get the link to the previous word using
+        ; 1b. However the first word will therefore have to be created manually to put
+        ; a 0 in the link field. We can't use .set to maintain the chain of links because
+        ; etca-as does relaxation.
+
+        .macro defcode name, namelen, flags=0, label
+        .section .rodata
+        .p2align 2
+        .int 1b-4 ; pointer to previous link; if we put 1: here then it would be to self!
+1:      
+        .byte \flags+\namelen
+        .ascii "\name"
+        .p2align 2
+        .globl \label
+\label :
+        .endm
+
+        .macro defword name, namelen, flags=0, label
+        defcode \name, \namelen, \flags, \label
+        call ENTER_PIN
+        .endm
+
+
+;; Finally, we can start implementing some basic Forth primitives.
+;; We have to make the first header by hand to fill the link correctly.
+
+        .section .rodata
+        .p2align 2
+        .int 0
+1:      
+        .byte 4
+        .ascii "DROP"
+        .p2align 2
+        .globl DROP
+DROP:
+        popd    TOS
+        NEXT
+
+        ; swap TOS and (DSP)
+        defcode "SWAP",4,,SWAP
+        popd    %rd0
+        pushd   TOS
+        movd    TOS, %rd0
+        NEXT
+
+        ; push a copy of TOS without changing TOS
+        defcode "DUP",3,,DUP
+        pushd   TOS
+        NEXT
+
+        ; make a copy of (DSP) the new TOS
+        
