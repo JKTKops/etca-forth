@@ -16,7 +16,7 @@ SECTIONS
     *(.text .text.*)
   }
   PROVIDE (__etext = .);
-  .rotata : { *(.rodata .rodata.*) }
+  .rodata : { *(.rodata .rodata.*) }
 
   .bss : {
     __bss_start = .;
