@@ -381,6 +381,39 @@ DROP:
         popd    TOS
         NEXT
 
+/* Returning from Forth Words
+We want EXIT to be early in the dictionary just to save a bit of time when searching, because
+it is referred to very rarely (most words get their reference to `EXIT` inserted by `;`).
+EXIT handles returning from a Forth word. A few comments ago (with a diagram), we said it has
+to restore IP from the return stack and then run NEXT. Simple enough!
+*/
+
+        defcode "EXIT",4,,EXIT
+        POPRSP  IP
+        NEXT
+
+/* Primitive Operations with Parameters
+In threaded code, how are we supposed to implement an operation like `15`, which just pushes the
+number 15 on the stack? The only thing we can put in the thread is the address of a forth word
+(whether defined in assembly or not) and we can't possibly make an entry for every single 32-bit
+number. So what do? The answer: turn `: 5+ 5 + ;` into this entry:
+
+   +------+---+-----+-----+---+-----------+---+-----+---+---+------+
+   | LINK | 2 | '5' | '+' | 0 | call %rd8 | 0 | LIT | 5 | + | EXIT |
+   +------+---+-----+-----+---+-----------+---+-----+---+---+------+
+
+When LIT is invoked, since it's defined in code, IP will be pointing to the number 5. LIT simply
+has to read it out of the thread, push it, and update IP to point to the proper next word. This
+lets us write modular primitives for use by the compiler (it's very hard for a user to do this
+directly within Forth). We will use the same trick to implement the control flow primitives
+JUMP and 0BRANCH (and maybe N0BRANCH?).
+*/
+
+        defcode "LIT",3,,LIT
+        pushd   TOS
+        movd    TOS, [IP++]
+        NEXT
+
         ; swap TOS and (DSP)
         defcode "SWAP",4,,SWAP
         popd    %rd0
@@ -393,5 +426,81 @@ DROP:
         pushd   TOS
         NEXT
 
-        ; make a copy of (DSP) the new TOS
-        
+        ; ( x y -- x y x )
+        defcode "OVER",4,,OVER
+        pushd   TOS
+        movd    TOS, [DSP+4]
+        NEXT
+
+        ; The next two can be optimized slightly with MMAI,
+        ; but one of the target machines does not support it.
+
+        ; ( x y z -- y z x )
+        defcode "ROT",3,,ROT
+        popd    %rd0            ; r0 = y
+        popd    %rd1            ; r1 = x
+        pushd   %rd0            ; push y on stack
+        pushd   TOS             ; push z on stack
+        movsd   TOS, %rd1       ; TOS is x
+        NEXT
+
+        ; ( x y z -- z x y )
+        defcode "-ROT",4,,NROT
+        popd    %rd0            ; r0 = y
+        popd    %rd1            ; r1 = x
+        pushd   TOS             ; push z on stack
+        pushd   %rd1            ; push x on the stack
+        movsd   TOS, %rd0       ; TOS is y
+        NEXT
+
+        ;; PRIMITIVES STILL NEEDED/WANTED
+
+        ; TUCK  ( x y -- y x y )
+        ; 2DROP ( x1 x2 -- )        
+        ; 2DUP  ( x1 x2 -- x1 x2 x1 x2 )
+        ; 2SWAP ( x1 x2 y1 y2 -- y1 y2 x1 x2 )
+        ; ?DUP  ( x -- 0 | x x ) [duplicate x only if it is not zero]
+        ; 1+    ( x -- x+1 )
+        ; 1-    ( x -- x-1 )
+
+        ; these are optional but easy and I think used frequently
+        ; CELL+ ( x -- x+4 )
+        ; CELLS ( x -- x<<2 )
+
+        ; back to (essentially) required
+        ; +     ( x y -- x+y )
+        ; -     ( x y -- x-y )
+        ; *     ( x y -- x*y ) ignores upper word
+        ;   "u" in stack diagrams means unsigned, "n" means signed integer.
+        ;   /MOD is allowed to do either floored or symmetric division, provided
+        ;   that the choice is documented. We choose symmetric, because it's what ETCa does.
+        ; U/MOD ( u1 u2 -- u3 u4 ) divide u1 by u2, returning the quotient u4 and rem u3.
+        ; /MOD  ( n1 n2 -- n3 n4 ) same as U/MOD, but signed.
+
+        ; Optional double-precision arithmetic (not sure if we need it?)
+        ; When "d" is the identifier in a stack diagram, it represents a double-cell value.
+        ; Double cell values appear on the stack with the more significant cell on top.
+        ; UM*    ( u1 u2 -- d ) unsigned multiply u1*u2, returning double-cell value d.
+        ; UM/MOD ( ud u1 -- u2 u3 ) Divide ud by u1, giving quotient u3 and remainder u2.
+        ; M*     ( n1 n2 -- d ) signed multiply n1*n2, returning double cell value d.
+        ; FM/MOD ( d  n1 -- n2 n3 ) Signed divide d1 by n1, giving the FLOORED quotient n3...
+        ; SM/REM ( d  n1 -- n2 n3 ) Divide d1 by n1, giving the SYMMETRIC quotient n3 and rem n2.
+        ; S>D    ( n -- d ) Sign-extend a value to double precision.
+
+        ; At least =, <, and U< are required, the rest are technical optional, but...
+        ; a macro would probably make defining these very easy anyway.
+        ; All operations are ( x y -- f )
+        ; "f" in stack diagrams means "flag" - a boolean value which is either all 1s or all 0s.
+        ; If the name starts with U, then the comparison is unsigned, else signed.
+        ; If the name starts with 0, the operator behaves as if 0 was pushed, and then the comparison
+        ; was done. This is slightly confusing - the 0 appears on the left of the operator in the name,
+        ; but is going to actually be the _right_ operand to the operator.
+        ; <> is the historical name for !=.
+        ;
+        ; = <> < > <= >=
+        ; 0= 0<> 0< 0> 0<= 0>=
+        ; U< U<= U> U>=
+
+        ; other binary operations ( x y -- xOpY )
+        ; AND OR XOR
+        ; INVERT ( x -- ~x )

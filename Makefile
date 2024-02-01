@@ -4,6 +4,10 @@ ARCH_ARG = -march=base+$(EXTENSIONS)
 MODEL = -mcmodel=medany -mpw=d
 
 AS = etca-elf-as $(ARCH_ARG) $(MODEL)
+# The assembler that should be used to produce annotated output. I have a bash script in /usr/local/bin
+# which calls out to the binutils-wrapper python script etca-as.py (it doesn't have an official
+# installer, so this is the best I've got atm). If you've installed it differently, adjust this command.
+ANN_AS = etca-as $(ARCH_ARG) $(MODEL)
 CPP = gcc -x assembler-with-cpp -E -P
 
 forth:	forth.o
@@ -18,7 +22,7 @@ forth.o:	forth.S
 #	$(AS) forth.s -o forth.o
 
 annotated:	forth.pre
-	etca-as.py $(ARCH_ARG) $(MODEL) forth.pre -o forth.ann
+	$(ANN_AS) forth.pre -o forth.ann
 
 forth.pre:	forth.S
 	$(CPP) forth.S > forth.pre
