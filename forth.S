@@ -499,18 +499,42 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
         pushd   TOS
 2:      NEXT
 
+        defcode "1+",2,,INC
+        addd    TOS, 1
+        NEXT
+
+        defcode "1-",2,,DEC
+        subd    TOS, 1
+        NEXT
+
+        defcode "CELL+",5,,CELLPLUS
+        addd    TOS, 4
+        NEXT
+
+        defcode "CELLS",5,,CELLS
+        shld    TOS, 2
+        NEXT
+
+        defcode "INVERT",6,,INVERT
+        rsubd   TOS, -1
+        NEXT
+
+        .macro defbinop name, len, flags=0, label, opcode
+        defcode \name, \len, \flags, \label
+        popd    %rd0
+        \opcode TOS, %rd0
+        NEXT
+        .endm
+
+        defbinop "+",1,,PLUS,addd
+        defbinop "-",1,,MINUS,rsubd
+        defbinop "AND",3,,AND,andd
+        defbinop "OR",2,,OR,ord
+        defbinop "XOR",3,,XOR,xord
+
         ;; PRIMITIVES STILL NEEDED/WANTED
 
-        ; 1+    ( x -- x+1 )
-        ; 1-    ( x -- x-1 )
-
-        ; these are optional but easy and I think used frequently
-        ; CELL+ ( x -- x+4 )
-        ; CELLS ( x -- x<<2 )
-
         ; back to (essentially) required
-        ; +     ( x y -- x+y )
-        ; -     ( x y -- x-y )
         ; *     ( x y -- x*y ) ignores upper word
         ;   "u" in stack diagrams means unsigned, "n" means signed integer.
         ;   /MOD is allowed to do either floored or symmetric division, provided
@@ -541,7 +565,3 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
         ; = <> < > <= >=
         ; 0= 0<> 0< 0> 0<= 0>=
         ; U< U<= U> U>=
-
-        ; other binary operations ( x y -- xOpY )
-        ; AND OR XOR
-        ; INVERT ( x -- ~x )

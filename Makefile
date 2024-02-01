@@ -7,7 +7,7 @@ AS = etca-elf-as $(ARCH_ARG) $(MODEL)
 # The assembler that should be used to produce annotated output. I have a bash script in /usr/local/bin
 # which calls out to the binutils-wrapper python script etca-as.py (it doesn't have an official
 # installer, so this is the best I've got atm). If you've installed it differently, adjust this command.
-ANN_AS = etca-as $(ARCH_ARG) $(MODEL)
+ANN_AS = etca-as $(ARCH_ARG) $(MODEL) # -T linker_script.lds
 CPP = gcc -x assembler-with-cpp -E -P
 
 forth:	forth.o
