@@ -273,11 +273,12 @@ The forth word QUIT doesn't actually quit the interpreter. It resets the return 
 back at the top of the interpreter loop. It's called QUIT because using it from another Forth word
 has the effect of quitting the current operation(s).
 
-Each of the stacks is initialized with 128 cells (512 bytes), but this is essentially configurable.
+Each of the stacks is initialized with 256 cells (1024 bytes), but this is essentially configurable.
+Most users of Forth will tell you that 256 cells is incredibly excessive. But we have the memory, so.
 */
 
 ; assume addresses 0x00000000-0x00000020 are memory mapped. Put the return stack at 0x400, so it's
-; actually 120 cells, but that's... so... many.
+; actually 248 cells, but that's... so... many.
 ; Other space in lower ram (<0x80000000) can be used for memory-mapping a console, buffers, or
 ; other similar ideas. Upper RAM is used for storing the dictionary. Lots of things are possible.
 ; Note that the dictionary _actually_ begins within this binary. But where the next dictionary
@@ -290,7 +291,10 @@ Each of the stacks is initialized with 128 cells (512 bytes), but this is essent
 
         .text
         .p2align 3
-main:
+main:                           ; TODO ext/ft check
+        mov     %rx0, 2
+        mov     %address_mode, %rx0     ; switch to real32
+
         mov     DSP, DATA_STACK_BOTTOM
         mov     RSP, RETURN_STACK_BOTTOM
         mov     ENTER_PIN, ENTER
@@ -347,6 +351,7 @@ assembly - that simply creates a header and a label, but stops before emitting t
         ; 1b. However the first word will therefore have to be created manually to put
         ; a 0 in the link field. We can't use .set to maintain the chain of links because
         ; etca-as does relaxation.
+        ; Because local label 1 is being used for this, it cannot be used for other things.
 
         .macro defcode name, namelen, flags=0, label
         .section .rodata
@@ -453,13 +458,49 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
         movsd   TOS, %rd0       ; TOS is y
         NEXT
 
+        ; ( x y -- y x y )
+        defcode "TUCK",4,,TUCK
+        popd    %rd0
+        pushd   TOS
+        pushd   %rd0
+        NEXT
+
+        ; ( x1 x2 -- )
+        defcode "2DROP",5,,TWODROP
+        addd    DSP, 4
+        popd    TOS
+        NEXT
+
+        ; ( x1 x2 -- x1 x2 x1 x2 )
+        defcode "2DUP",4,,TWODUP
+        movd    %rd0, [DSP]     ; mov pseudo correctly picks ld for this
+        pushd   TOS
+        pushd   %rd0
+        NEXT
+
+        ; ( x1 x2 y1 y2 -- y1 y2 x1 x2 )
+        defcode "2SWAP",5,,TWOSWAP
+        popd    %rd0            ; r0 = y1
+        popd    %rd1            ; r1 = x2
+        popd    %rd2            ; r2 = x1
+        pushd   %rd0
+        pushd   TOS
+        pushd   %rd2
+        movsd   TOS, %rd1
+        NEXT
+
+        ; ( x -- 0 | x x)
+        defcode "?DUP",4,,QDUP
+        test    TOS, -1
+        jz      2f              ; we could jnz DUP to save one word of space
+                                ; but empirically, ?DUP is usually used in loops and so most
+                                ; often the not-zero path is taken. Not-taken branches are
+                                ; significantly faster on one of the target machines.
+        pushd   TOS
+2:      NEXT
+
         ;; PRIMITIVES STILL NEEDED/WANTED
 
-        ; TUCK  ( x y -- y x y )
-        ; 2DROP ( x1 x2 -- )        
-        ; 2DUP  ( x1 x2 -- x1 x2 x1 x2 )
-        ; 2SWAP ( x1 x2 y1 y2 -- y1 y2 x1 x2 )
-        ; ?DUP  ( x -- 0 | x x ) [duplicate x only if it is not zero]
         ; 1+    ( x -- x+1 )
         ; 1-    ( x -- x-1 )
 

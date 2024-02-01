@@ -14,12 +14,11 @@ forth:	forth.o
 	etca-elf-ld -T linker_script.lds forth.o -o forth
 	etca-elf-objcopy -O binary forth forth.bin
 	cp forth.bin /mnt/c/Users/zergl/AppData/Roaming/godot/app_userdata/Turing\ Complete/schematics/architecture/ETCA/uETCa-v1/
-	rm forth
+
+# rm forth
 
 forth.o:	forth.S
 	$(CPP) forth.S | $(AS) -o forth.o
-
-#	$(AS) forth.s -o forth.o
 
 annotated:	forth.pre
 	$(ANN_AS) forth.pre -o forth.ann
