@@ -191,7 +191,8 @@ pinning %r8. However, it is very difficult to emit the target addresses in the J
 shift operations from EXOP, so a different alternative may be needed.
 */
 
-#define TOS %rd3
+#define TOS  %rd3
+#define TOSq %rq3
 #define ENTER_PIN %rd8
 
 /* The Interpreter and The Return Stack [based on JonesForth comment]
@@ -519,23 +520,71 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
         rsubd   TOS, -1
         NEXT
 
-        .macro defbinop name, len, flags=0, label, opcode
-        defcode \name, \len, \flags, \label
+        .macro defbinop name, len, label, opcode
+        defcode "\name", \len,, \label
         popd    %rd0
         \opcode TOS, %rd0
         NEXT
         .endm
 
-        defbinop "+",1,,PLUS,addd
-        defbinop "-",1,,MINUS,rsubd
-        defbinop "AND",3,,AND,andd
-        defbinop "OR",2,,OR,ord
-        defbinop "XOR",3,,XOR,xord
+        defbinop "+",1,PLUS,addd
+        defbinop "-",1,MINUS,rsubd
+        defbinop "AND",3,AND,andd
+        defbinop "OR",2,OR,ord
+        defbinop "XOR",3,XOR,xord
+
+        defcode "*",1,,TIMES
+        popd    %rd0
+        umulq   TOSq, %rq0       ; This sequence is faster than umuld on one of the targets.
+        movsd   TOS, TOS
+        NEXT
+
+        ; COMPARISONS
+        ; All operations are ( x y -- f )
+        ; "f" in stack diagrams means "flag" - a boolean value which is either all 1s or all 0s.
+        ; If the name starts with U, then the comparison is unsigned, else signed.
+        ; If the name starts with 0, the operator behaves as if 0 was pushed, and then the comparison
+        ; was done. This is slightly confusing - the 0 appears on the left of the operator in the name,
+        ; but is going to actually be the _right_ operand to the operator.
+        ; <> is the historical name for !=.
+ 
+        .macro defcmp name, len, label, cc
+        defcode "\name",\len,,\label
+        popd       %rd0
+        cmpd       %rd0, TOS
+        movd       TOS, 0
+        c\cc movd  TOS, -1
+        NEXT
+        .endm
+
+        defcmp "=",1,EQ,e
+        defcmp "<>",2,NEQ,ne
+        defcmp "<",1,LT,l
+        defcmp ">",1,GT,g
+        defcmp "<=",2,LEQ,le
+        defcmp ">=",2,GEQ,ge
+        defcmp "U<",2,ULT,b
+        defcmp "U>",2,UGT,a
+        defcmp "U<=",3,ULEQ,be
+        defcmp "U>=",3,UGEQ,ae
+
+        .macro def0cmp name, len, label, cc
+        defcode "\name",\len,,\label
+        cmpd       TOS, 0
+        movd       TOS, 0
+        c\cc movd  TOS, -1
+        NEXT
+        .endm
+
+        def0cmp "0=",2,ZEQ,e
+        def0cmp "0<>",3,ZNEQ,ne
+        def0cmp "0<",2,ZLT,l
+        def0cmp "0>",2,ZGT,g
+        def0cmp "0<=",3,ZLEQ,le
+        def0cmp "0>=",3,ZGEQ,ge
 
         ;; PRIMITIVES STILL NEEDED/WANTED
 
-        ; back to (essentially) required
-        ; *     ( x y -- x*y ) ignores upper word
         ;   "u" in stack diagrams means unsigned, "n" means signed integer.
         ;   /MOD is allowed to do either floored or symmetric division, provided
         ;   that the choice is documented. We choose symmetric, because it's what ETCa does.
@@ -552,16 +601,3 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
         ; SM/REM ( d  n1 -- n2 n3 ) Divide d1 by n1, giving the SYMMETRIC quotient n3 and rem n2.
         ; S>D    ( n -- d ) Sign-extend a value to double precision.
 
-        ; At least =, <, and U< are required, the rest are technical optional, but...
-        ; a macro would probably make defining these very easy anyway.
-        ; All operations are ( x y -- f )
-        ; "f" in stack diagrams means "flag" - a boolean value which is either all 1s or all 0s.
-        ; If the name starts with U, then the comparison is unsigned, else signed.
-        ; If the name starts with 0, the operator behaves as if 0 was pushed, and then the comparison
-        ; was done. This is slightly confusing - the 0 appears on the left of the operator in the name,
-        ; but is going to actually be the _right_ operand to the operator.
-        ; <> is the historical name for !=.
-        ;
-        ; = <> < > <= >=
-        ; 0= 0<> 0< 0> 0<= 0>=
-        ; U< U<= U> U>=
