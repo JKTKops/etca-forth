@@ -287,7 +287,7 @@ Most users of Forth will tell you that 256 cells is incredibly excessive. But we
 ; we will initialize that to the first cell of upper RAM.
 ; To change where buffers are being allocated, adjust the "ram" section in the linker script.
 .set RETURN_STACK_BOTTOM, 0x400
-.set DATA_STACK_BOTTOM,   0x800
+.set DATA_STACK_BOTTOM,   0x100 ; 0x800
 ; linker script is set to start RAM at 0x800.
 
         .text
@@ -304,7 +304,9 @@ main:                           ; TODO ext/ft check
 
         .section .rodata
 cold_start:
-        .int 0  ; TODO: should be .int QUIT
+        .int LIT, 15, LIT, 30  ; TODO: should be .int QUIT
+        .int LE
+        .int DUP
 
 /* Defining Built-In Words
 
@@ -583,8 +585,7 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
         def0cmp "0<=",3,ZLEQ,le
         def0cmp "0>=",3,ZGEQ,ge
 
-        ;; PRIMITIVES STILL NEEDED/WANTED
-
+        ;; MATHEMATICAL PRIMITIVES STILL NEEDED/WANTED
         ;   "u" in stack diagrams means unsigned, "n" means signed integer.
         ;   /MOD is allowed to do either floored or symmetric division, provided
         ;   that the choice is documented. We choose symmetric, because it's what ETCa does.
@@ -601,3 +602,54 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
         ; SM/REM ( d  n1 -- n2 n3 ) Divide d1 by n1, giving the SYMMETRIC quotient n3 and rem n2.
         ; S>D    ( n -- d ) Sign-extend a value to double precision.
 
+/* RSTACK Operations
+
+Forth supports several manipulations of its return stack. Recall that we have the return stack
+pointed to by RSP (a pinned register). The standard operations >R, R>, and R@ allowing moving
+values between the data and return stacks. The rule is that anything put on the return stack by
+>R must be removed (either by R> or RDROP) before the word that did it can return, because the
+data is blocking the return address. But for the same reason, we can't implement these words as
+forth words that have ENTER as their entry code, because then *their* return address would block
+how we want to move the data! Instead, these are primitive words.
+
+The additional words RP@ RP! SP@ and SP! in some Forths allow direct manipulation of the data
+and return stack pointers. This is useful for implementing `THROW` and `CATCH`. Since this is
+only a bootstrapping Forth, we're not too concerned about those, and we can add them later if
+needed.
+
+*/
+
+        defcode ">R",2,,TO_R
+        PUSHRSP TOS
+        popd    TOS
+        NEXT
+
+        defcode "R>",2,,FROM_R
+        pushd   TOS
+        POPRSP  TOS
+        NEXT
+
+        defcode "R@",2,,R_FETCH
+        pushd   TOS
+        movsd   TOS, [RSP]
+        NEXT
+
+        defcode "RDROP",5,,RDROP
+        addd    RSP, 4
+        NEXT
+
+/* Memory Operations */
+
+        ; ( a-addr -- x )
+        defcode "@",1,,FETCH
+        movsd   TOS, [TOS]
+        NEXT
+
+        ; ( x a-addr -- )
+        defcode "!",1,,STORE        
+        popd    %rd0
+        movsd   [TOS], %rd0
+        popd    TOS
+        NEXT
+
+        
