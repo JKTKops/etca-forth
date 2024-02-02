@@ -305,7 +305,7 @@ main:                           ; TODO ext/ft check
         .section .rodata
 cold_start:
         .int LIT, 15, LIT, 30  ; TODO: should be .int QUIT
-        .int LE
+        .int LEQ
         .int DUP
 
 /* Defining Built-In Words
@@ -534,6 +534,8 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
         defbinop "AND",3,AND,andd
         defbinop "OR",2,OR,ord
         defbinop "XOR",3,XOR,xord
+        defbinop "LSHIFT",6,LSHIFT,shld
+        defbinop "RSHIFT",6,RSHIFT,shrd
 
         defcode "*",1,,TIMES
         popd    %rd0
@@ -652,4 +654,4 @@ needed.
         popd    TOS
         NEXT
 
-        
+
