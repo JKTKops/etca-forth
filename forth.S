@@ -74,10 +74,10 @@ We can use macros to define nicer names for pushing and popping from the return 
 #define RSP %rd5
 
         .macro PUSHRSP src
-        mov     [--RSP], \src
+        movd    [--RSP], \src
         .endm
         .macro POPRSP dst
-        mov     \dst, [RSP++]
+        movd    \dst, [RSP++]
         .endm
 
 /* Direct-Threaded Code
@@ -191,8 +191,7 @@ pinning %r8. However, it is very difficult to emit the target addresses in the J
 shift operations from EXOP, so a different alternative may be needed.
 */
 
-#define TOS  %rd3
-#define TOSq %rq3
+#define TOS  %r3
 #define ENTER_PIN %rd8
 
 /* The Interpreter and The Return Stack [based on JonesForth comment]
@@ -288,6 +287,7 @@ Most users of Forth will tell you that 256 cells is incredibly excessive. But we
 ; To change where buffers are being allocated, adjust the "ram" section in the linker script.
 .set RETURN_STACK_BOTTOM, 0x400
 .set DATA_STACK_BOTTOM,   0x100 ; 0x800
+.set DICTIONARY_START,    0x80000000
 ; linker script is set to start RAM at 0x800.
 
         .text
@@ -298,6 +298,7 @@ main:                           ; TODO ext/ft check
 
         mov     DSP, DATA_STACK_BOTTOM
         mov     RSP, RETURN_STACK_BOTTOM
+        movd    [var_HERE], DICTIONARY_START
         mov     ENTER_PIN, ENTER
         mov     IP, cold_start
         NEXT
@@ -494,7 +495,7 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
 
         ; ( x -- 0 | x x)
         defcode "?DUP",4,,QDUP
-        test    TOS, -1
+        testd   TOS, -1
         jz      2f              ; we could jnz DUP to save one word of space
                                 ; but empirically, ?DUP is usually used in loops and so most
                                 ; often the not-zero path is taken. Not-taken branches are
@@ -539,7 +540,7 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
 
         defcode "*",1,,TIMES
         popd    %rd0
-        umulq   TOSq, %rq0       ; This sequence is faster than umuld on one of the targets.
+        umulq   TOS, %rq0       ; This sequence is faster than umuld on one of the targets.
         movsd   TOS, TOS
         NEXT
 
@@ -614,6 +615,8 @@ data is blocking the return address. But for the same reason, we can't implement
 forth words that have ENTER as their entry code, because then *their* return address would block
 how we want to move the data! Instead, these are primitive words.
 
+Perhaps add 2>R and 2R>?
+
 The additional words RP@ RP! SP@ and SP! in some Forths allow direct manipulation of the data
 and return stack pointers. This is useful for implementing `THROW` and `CATCH`. Since this is
 only a bootstrapping Forth, we're not too concerned about those, and we can add them later if
@@ -654,4 +657,63 @@ needed.
         popd    TOS
         NEXT
 
+        ; ( x a-addr -- )
+        ; [a-addr]+=x
+        defcode "+!",2,,PLUS_STORE
+        popd    %rd0
+        addd    [TOS], %rd0
+        popd    TOS
+        NEXT
 
+        ; ( x a-addr -- )
+        ; [a-addr]-=x
+        defcode "-!",2,,MINUS_STORE
+        popd    %rd0
+        subd    [TOS], %rd0
+        popd    TOS
+        NEXT
+
+        ; Those are all dword-oriented operations. Byte operations are also useful:
+        
+        defcode "C@",2,,FETCH_BYTE
+        movzh   TOS, [TOS]
+        NEXT
+
+        defcode "C!",2,,STORE_BYTE
+        popd    %rd0
+        movh    [TOS], %rh0
+        popd    TOS
+        NEXT
+
+/* Forth Variables (and Built-in Variables)
+
+A Forth variable (declared by `VARIABLE <NAME>`) is a Forth word that pushes a dedicated data
+address on the stack. This address can then be used with @ and ! to manipulate the value of the
+variable. Forth has a few built-in variables, namely STATE, HERE, and BASE.
+
+STATE records whether we are interpreting or compiling. This bootstrapping Forth only needs to
+support minimal interpretation, but all interpretation is equally minimal, so we just have to
+support it. HERE records the current value of the bump allocation pointer. The address that will
+next be allocated by `,` is the current value of HERE. BASE records the current base used for
+inputting and outputting numbers. This bootstrap Forth only supports base 10, so we don't need it.
+
+We additionally support a variable LATEST, which points to the last dictionary entry created by
+`BUILD` (which is called by `CREATE` and `:` etc.). So, it will be unset before the first word
+is created in whatever Forth script is being run.
+
+*/
+
+        .macro defvar name, len
+        defcode "\name",\len,,\name
+        pushd   var_\name
+        NEXT
+
+        .bss
+        .p2align 2
+var_\name :
+        .space 4
+        .endm
+
+        defvar "STATE",5
+        defvar "HERE",4
+        defvar "LATEST",6
