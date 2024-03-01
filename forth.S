@@ -19,6 +19,9 @@ in the future.
 This file is intended to be viewed in a pane at least 100 columns wide.
 */
 
+/* Adjust this for the input MMIO. See Comment: Parsing Input. */
+#define INPUT_STREAM 1
+
 /* Basic overview of Forth
 Programs are sequences of ``words," essentially just tokens separated by whitespace. This system
 interpreters characters 0x0A and 0x20 ('\n' and ' ') as whitespace, and 0x00 as the end-of-input.
@@ -217,7 +220,8 @@ it runs NEXT to invoke the new thread.
 _start: jmp main
 
         .text
-        .p2align 3
+        ; .p2align 2      ; Both target systems can fetch stall, but 2mod8 is already good enough.
+                          ; So this can be commented out for now.
 ENTER:
         PUSHRSP IP        ; save old IP
         addd    %rd0, 4   ; PFA = CFA + 4
@@ -299,15 +303,16 @@ main:                           ; TODO ext/ft check
         mov     DSP, DATA_STACK_BOTTOM
         mov     RSP, RETURN_STACK_BOTTOM
         movd    [var_HERE], DICTIONARY_START
+        movd    [var_LATEST], init_LATEST
         mov     ENTER_PIN, ENTER
+
         mov     IP, cold_start
         NEXT
 
         .section .rodata
 cold_start:
-        .int LIT, 15, LIT, 30  ; TODO: should be .int QUIT
-        .int LEQ
-        .int DUP
+        .int QUIT
+
 
 /* Defining Built-In Words
 
@@ -370,8 +375,9 @@ assembly - that simply creates a header and a label, but stops before emitting t
         .endm
 
         .macro defword name, namelen, flags=0, label
-        defcode \name, \namelen, \flags, \label
-        call ENTER_PIN
+        defcode "\name", \namelen, \flags, \label
+        jmp ENTER_PIN
+        .p2align 2
         .endm
 
 
@@ -535,8 +541,19 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
         defbinop "AND",3,AND,andd
         defbinop "OR",2,OR,ord
         defbinop "XOR",3,XOR,xord
-        defbinop "LSHIFT",6,LSHIFT,shld
-        defbinop "RSHIFT",6,RSHIFT,shrd
+
+        ; LSHIFT and RSHIFT aren't symmetric so we do have to
+        ; implement them separately with some shuffling around TOS.
+        .macro defshift name, label, opcode
+        defcode "\name",6,,\label
+        movd    %rd0, TOS
+        popd    TOS
+        \opcode TOS, %rd0
+        NEXT
+        .endm
+
+        defshift "LSHIFT",LSHIFT,shld
+        defshift "RSHIFT",RSHIFT,shrd
 
         defcode "*",1,,TIMES
         popd    %rd0
@@ -555,10 +572,10 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
  
         .macro defcmp name, len, label, cc
         defcode "\name",\len,,\label
-        popd       %rd0
-        cmpd       %rd0, TOS
-        movd       TOS, 0
-        c\cc movd  TOS, -1
+        popd  %rd0
+        cmpd  %rd0, TOS
+        movd  TOS, 0
+   c\cc movd  TOS, -1
         NEXT
         .endm
 
@@ -575,9 +592,9 @@ JUMP and 0BRANCH (and maybe N0BRANCH?).
 
         .macro def0cmp name, len, label, cc
         defcode "\name",\len,,\label
-        cmpd       TOS, 0
-        movd       TOS, 0
-        c\cc movd  TOS, -1
+        cmpd  TOS, 0
+        movd  TOS, 0
+   c\cc movd  TOS, -1
         NEXT
         .endm
 
@@ -685,6 +702,20 @@ needed.
         popd    TOS
         NEXT
 
+        ; As is aligning pointers
+
+        ; ( addr -- a-addr )
+        ; return the first aligned address at least addr
+        defcode "ALIGNED",7,,ALIGNED
+        addd    TOS, 3
+        andd    TOS, -4
+        NEXT
+
+        ; Align the HERE pointer.
+        defword "ALIGN",5,,ALIGN
+        .int    HERE, FETCH, ALIGNED, HERE, STORE
+        .int    EXIT
+
 /* Forth Variables (and Built-in Variables)
 
 A Forth variable (declared by `VARIABLE <NAME>`) is a Forth word that pushes a dedicated data
@@ -701,11 +732,14 @@ We additionally support a variable LATEST, which points to the last dictionary e
 `BUILD` (which is called by `CREATE` and `:` etc.). So, it will be unset before the first word
 is created in whatever Forth script is being run.
 
+Similarly we could make constants, but we don't need any for our purposes.
+
 */
 
         .macro defvar name, len
         defcode "\name",\len,,\name
-        pushd   var_\name
+        pushd   TOS
+        movd    TOS, var_\name
         NEXT
 
         .bss
@@ -717,3 +751,426 @@ var_\name :
         defvar "STATE",5
         defvar "HERE",4
         defvar "LATEST",6
+
+        ; internal NT-FIND operation which takes (on the stack) a pointer to a string and its
+        ; length and searches for a dictionary entry with that name.
+        ; The name is copied into the word buffer, which is also used by PARSE and PARSE-NAME, so
+        ; there's a bit of synchronization that has to be handled with care. When ?FIND is passed
+        ; a string parsed by PARSE or PARSE-NAME, it needs to copy the string into the same place
+        ; non-destructively! The solution: PARSE and PARSE-NAME put the string in the buffer
+        ; starting at index 1, not index 0. This leaves one byte of space to copy the length, and
+        ; the rest of the copy will proceed as normal (4 bytes/iter if aligned, 1b/iter otherwise).
+        ; Returns: 0 if not found, otherwise nt (in TOS).
+        ; ( c-addr u -- nt | 0 )
+        defcode "NT-FIND",7,,NT_FIND
+        popd    %rd0                    ; c-addr -> r0
+        movd    %rd1, WORD_BUFFER
+        call    copy_name               ; name -> WORD_BUFFER
+        ; r0 - r3 are free for use
+        movd    %rd0, WORD_BUFFER       ; &WORD_BUFFER -> r0
+        movd    TOS, [var_LATEST]       ; latest entry -> TOS
+2:      movd    %rd1, 4                 ; offset_of(ENTRY, cstr)
+        addd    %rd1, TOS               ; latest entry name -> r1
+        call    cmp_name                ; clobber r2, names =? -> FLGS (Z => =)
+        je      3f                      ; Yes, exit
+        movd    TOS, [TOS]              ; (entry.link) -> TOS
+        testd   TOS, -1                 ; is ptr null?
+        jnz     2b                      ; No, loop
+3:      NEXT                            ; Otherwise exit.
+
+        ; inputs: %rh3 length, %rd0 pointer to source string, %rd1 destination
+        ; outputs: nothing
+        ; clobbers %r0-r3
+        ; no stack effects
+        .p2align 2 ; prevent fetch stalls
+copy_name:
+        ; copy length to buffer
+        movh    [%rd1], %rh3
+        ; copy 3 characters to buffer (might overrun string, that's OK)
+        movh    %rh2, [%rd0++]
+        movh    [%rd1+1], %rh2
+        movh    %rh2, [%rd0++]
+        movh    [%rd1+2], %rh2
+        movh    %rh2, [%rd0++]
+        movh    [%rd1+3], %rh2
+        addd    %rd1, 4
+        subh    %rh3, 3                 ; len -= 3
+        retz                            ; if the len is now 0, short circuit exit.
+        ; otherwise if len went negative, skip to 0 insertion for 4-byte copy
+        jn      3f                      ; local 3: 4-byte copy insert 0s at end
+
+        testd   %rd0, 3                 ; is the string pointer now aligned?
+        jnz     5f                      ; local 5: 1-byte copy loop top
+
+2:      movd    %rd2, [%rd0++]
+        movd    [%rd1], %rd2            ; copy 4 bytes to buffer
+        addd    %rd1, 4
+        subh    %rh3, 4
+        ja      2b                      ; %rd1 += 4, then loop if < stop pointer
+        ; if we wrote too many bytes, now we have to insert some zeroes
+3:      movh    %rh0, 0                 ; we will want to write 0s
+        lead    %rd2, [4*%rd3 + 4f]     ; %rd2 = 4f - overshoot*4
+        jmp     %rd2                    ; jump to appropriate instruction
+
+        ; here to 4 is a table of instructions for inserting the right number of 0s
+        ; each group must be 4 bytes of code!
+        ; Aligning them prevents a fetch stall as well.
+        .p2align 2
+        ; insert 3
+        movh    [%rd1 + -3], %rh0       ; *(p-3) = 0
+        ; insert 2
+        movh    [%rd1 + -2], %rh0       ; *(p-2) = 0
+        ; insert 
+        movh    [%rd1 + -1], %rh0       ; *(p-1) = 0
+        ; insert none, i.e. we're done.
+4:      ret
+
+        ; now a byte copy loop. We get here if the input %rd0 was not 1 mod 4.
+        ; guaranteed that %rh3 (len) is positive.
+5:      movh    %rh2, [%rd0++]
+        movh    [%rd1], %rh2            ; copy one byte
+        addd    %rd1, 1                 ; (char*)%rd1++
+        subh    %rh3, 1                 ; len--
+        ja      5b                      ; loop if len > 0
+        ; write 0s until %rd1 is 4-byte aligned
+        movh    %rh0, 0                 ; done with string ptr, but will write 0s
+        jmp     7f                      ; enter loop at test
+6:      movh    [%rd1], %rh0            ; *p = 0
+        addd    %rd1, 1                 ; p++
+7:      testd   %rd1, 3                 ; 4-byte aligned?
+        jnz     6b                      ; loop if not
+        ret                             ; else done.
+
+        ; inputs: %rd0 word buffer, %rd1 name to compare (both counted strings)
+        ; clobbers: %r1, %r2
+        ; returns: %rd0 still word buffer, zero flag set if names are equal
+cmp_name:
+        movd    %rd2, %rd0
+        ; special case first word: bit 7 of length byte is F_IMMED, so clear that.
+        movd    %rd9, [%rd1++]
+        andd    %rd9, 0xFFFFFF7F
+        cmpd    %rd9, [%rd2]            ; compare first words
+        retne                           ; not equal: return with zero flag clear
+        andh    %rh9, F_LENMASK         ; name length -> r9
+        shrh    %rh9, 2                 ; name length in words -> r9
+        addh    %rh9, 1                 ; add one for the word we already compared
+        jmp     2f                      ; enter loop at test
+3:      movd    %rd10, [%rd1++]         ; next word from p -> r10
+        cmpd    %rd10, [%rd2]           ; compared to next word from buf
+        retne                           ; not equal: return with zero flag clear
+2:      addd    %rd2, 4                 ; buf++
+        subh    %rh9, 1                 ; dec len
+        jg      3b                      ; was more than 1? yes: loop
+        ret                             ; len went to 0, so zero flag is set. Return.
+
+        .bss
+        .p2align 2
+WORD_BUFFER:
+        .space 40
+
+/* Parsing Input
+
+Forth defines two words for parsing input: `PARSE` and `PARSE-NAME`. There's also a third word,
+`WORD`, but we won't implement it because it's obsolete and `PARSE-NAME` does its job better.
+
+`PARSE` takes a character on the stack and then reads input characters until seeing that one.
+We could make it also stop when it reads \NUL, but this is unnecessary because such conditions
+only arise from malformed code (the last word in the file will be parsed by PARSE-NAME, not PARSE).
+The delimiter character is consumed but not in the resulting string. The resulting string is
+returned as a `c-addr u` stack pair. The `c-addr` will always be to `WORD_BUFFER+1`, but this
+is a detail specific to this implementation.
+
+`PARSE-NAME` behaves like `PARSE`, except it also skips whitespace before starting to parse
+and is delimited by _any_ whitespace instead of by ' ' specifically. "Whitespace" is considered
+a character value <= ' '. Notably this includes 0, so no special check is needed.
+
+The key question becomes: how do we actually read the next character of input? And here is the crux
+of a difficult question for a bootstrapping system - how powerful should it be? For portability,
+and even usability as a BIOS, the system should really (*really*) support multiple modes of input,
+ideally including an interactive one, and some way to specify which mode is actually to be used.
+This is certainly possible, but it's quite a challenge!
+
+However, it's also OK if we go small. This is a bootstrapping Forth, and is not intended to act
+as a BIOS. So we can forgo interactivity entirely. For now, we'll assume the existence of a single
+MMIO address which we can read to get the next character of an input file. If that file wants to
+define some way to take interactive input and then give control to an interactive interpreter,
+it can do that. By doing it this way, we lower the burden on our Forth. And the system is more
+likely to be used to bootstrap a LISP or BASIC implementation, I believe, than an interactive
+Forth (which is too low-level for e.g. implementing a higher-level language interactively).
+If bootstrapping an interactive LISP, the Forth code that implements the LISP will have been
+required to define new parsing words anyway! So all our interactivity effort would have been
+wasted.
+
+To reiterate: we assume the existence of a singular MMIO address that can read one input character
+at a time. Imagine the MMIO is connected to a file. However it could also feasibly trigger an
+interrupt, which then busywaits for a keyboard input, or something like that.
+
+*/
+
+        ; ( char "ccc<char>" -- c-addr u )
+        defcode "PARSE",5,,PARSE
+        movd    %rd0, WORD_BUFFER+1
+        movd    %rd1, %rd0              ; save initial ptr
+        jmp     2f                      ; enter loop at load
+3:      movh    [%rd0], %rh2            ; write char to buffer
+        addd    %rd0, 1                 ; bump buffer pointer
+2:      loadh   %rh2, INPUT_STREAM      ; load char
+        cmph    %rh2, TOS               ; is char the delimiter?
+        jne     3b                      ; No.
+        pushd   %rd1                    ; push c-addr
+        subd    %rd0, %rd1              ; u = current - initial
+        movd    TOS, %rd0               ; TOS = u
+        NEXT
+
+        ; ( "<spaces>ccc<space>" -- c-addr u )
+        defcode "PARSE-NAME",10,,PARSE_NAME
+        ; in the first loop to discard whitespace, we do have to check specially for \NUL,
+        ; or else we will just end up spinning forever at end-of-file and never return the
+        ; 0-length string we are supposed to read.
+        mov     %rd0, WORD_BUFFER+1
+        pushd   TOS                     ; push TOS, we are pushing two things here
+        pushd   %rd0                    ; push c-addr
+        movd    TOS, 0                  ; zero u
+        movh    %rh1, ' '               ; stash ' ' which we will cmp against several times
+        jmp     2f                      ; enter loop at load
+        .p2align 1                      ; FI for ' ' misaligned instructions.
+        ; worth optimizing to only check for 0 if we already know it's whitespace,
+        ; because whitespace is rare and 0 is rarer.
+3:      cmph    %rh2, 0                 ; \NUL?
+        je      4f                      ; Yes, go run NEXT.
+        ; Read the next character.
+        ; not worth putting ' ' in a register because more than
+        ; one iteration is rare.
+2:      loadh   %rh2, INPUT_STREAM      ; load char
+        cmph    %rh2, %rh1              ; Whitespace?
+        jbe     3b                      ; Yes.
+        ; Now read characters into the buffer, stop on whitespace.
+        movd    TOS, %rd0               ; save initial ptr where it can easily become u
+                                        ; fallthrough into loop
+3:      movh    [%rd0], %rh2            ; write char to buffer
+        addd    %rd0, 1                 ; bump buffer pointer
+2:      loadh   %rh2, INPUT_STREAM      ; load char
+        cmph    %rh2, %rh1              ; Whitespace?
+        ja      3b                      ; No.
+        ; already pushed c-addr, so we just have to set u.
+        rsubd   TOS, %rd0               ; u = current ptr - start ptr
+4:      NEXT
+
+        ; TODO: NUMBER ( cs-addr -- n u )
+        ; (cs-addr is a counted string)
+        ; Returns the string converted to a number, and the number of unconverted characters.
+        ; If u is 0, then n is the numeric value of the string, otherwise n is undefined.
+        ; Only base 10 is supported.
+        ; If the input string has length 0, ( x 1 ) is returned on the stack.
+        defcode "NUMBER",6,,NUMBER
+        movh    %rh0, [TOS++]           ; *cs-addr++ -> len
+        movd    %rd1, 0                 ; 0 -> n
+        cmph    %rh0, 0                 ; is len 0?
+        jnz     2f                      ; No, enter loop at top
+        movh    %rh0, 1                 ; indicate failure
+        jmp     3f                      ; and jump to return code
+2:      movh    %rh2, [TOS++]           ; next-char -> r2
+        subh    %rh2, '0'               ; next-char <? '0'
+        jb      3f                      ; Yes, we're done.
+        cmph    %rh2, 9                 ; next-char >? '9'
+        ja      3f                      ; Yes, also done.
+        umulq   %rq1, 10                ; n *= 10
+        addd    %rd1, %rd2              ; n += digit
+        subh    %rh0, 1                 ; len--
+        jnz     2b                      ; Loop if len is still not 0
+3:      pushd   %rd1                    ; push n
+        movzh   TOS, %rh0               ; u -> TOS (0 if fallthrough, nonzero if loop exit)
+        NEXT
+
+/* Define in Forth or in Assembly?
+
+With that, we've implemented most of the code that really must be
+written in assembly.
+
+Writing code in Forth is easier than writing it in assembly, but slower.
+For our purposes, "easy" is extremely valuable. So we'll often prefer that
+even when there's a (small enough) runtime or space cost.
+
+That said, I have a pretty high tolerance for what I consider "easy" in
+assembly. Some words here _could_ be defined in Forth, but I define them
+in assembly anyway. This choice should be made by the author of the
+bootstrap Forth and there is of course no obligation to make the same
+choices as me. Words executed often should get some preference towards
+being implemented in assembly in either case.
+
+*/
+
+        ; Continuing with functions used to manipulate the dictionary...
+        ; * `,` is used in compilation (or any time) to append to the newest entry.
+        ; * `HIDDEN` toggles the F_SMUDGE bit on the NT given in TOS.
+        ; * `IMMEDIATE` sets the F_IMMED bit on the latest entry. It's itself F_IMMED
+        ;       to allow an older Forth style of writing it in the definition instead of after.
+        ; * `BUILD` forms a new dictionary entry given a name (without setting the code field).
+        ; * `:` uses BUILD to make a new dictionary entry, sets F_SMUDGE, switches
+        ;       to compile mode, and writes `call ENTER_PIN` into the code field.
+        ; * `;` writes EXIT into the current entry, then switches to interpret mode.
+        ; * The pair of words CREATE and DOES> are significantly more complicated and unlikely
+        ;       to be required for bootstrapping with Forth. The actual implementation would
+        ;       not be that bad, but the _concept_ is complex. So we'll leave it off for now.
+        ;       (actually, they might be very useful for implementing a language. hmm.)
+
+        ; ( x -- )
+        ; Write x to HERE and bump it.
+        defcode ",",1,,COMMA
+        call    _COMMA
+        popd    TOS                     ; remove x from the stack
+        NEXT
+
+        ; append value in TOS to current definition
+_COMMA: loadd   %rd0, var_HERE          ; movd r,[d] syntax mistakenly selects movsd
+_COMMAH: ; use this one if (HERE) is already in rd0
+        movd    [%rd0], TOS
+        addd    %rd0, 4                 ; bump value of HERE
+        stored  %rd0, var_HERE          ; and save it back
+        ret
+
+        ; ( nt -- )
+        defcode "HIDDEN",6,,HIDDEN
+        xorh    [TOS+4], F_SMUDGE       ; toggle F_SMUDGE bit of given nt
+        popd    TOS                     ; and drop the nt
+        NEXT
+
+        ; ( -- )
+        defcode "IMMEDIATE",9,F_IMMED,IMMEDIATE
+        loadd   %rd0, var_LATEST        ; (LATEST) -> r0
+        orh     [%rd0+4], F_IMMED       ; set F_IMMED bit on latest entry
+        NEXT
+
+        ; ( c-addr u -- nt )
+        defcode "BUILD",5,,BUILD
+        loadd   %rd0, var_HERE          ; (HERE) -> r0
+        addd    %rd0, 3                 ; align up
+        andd    %rd0, -4                ;   to 4 bytes
+        pushd   %rd0                    ; that's the nt we will return.
+        pushd   TOS                     ; save u
+        loadd   TOS, var_LATEST         ; (LATEST) -> TOS
+        call    _COMMAH                 ; write link field
+        subd    %rd0, 4                 ; pointer to link field
+        stored  %rd0, var_LATEST        ; write that to (LATEST)
+        popd    TOS                     ; restore u to arg:"len"
+        loadd   %rd1, var_HERE          ; (HERE) -> arg:"dst"
+        popd    %rd0                    ; c-addr -> arg:"src"
+        pushd   TOS                     ; save length
+        call    copy_name               ; copy the name into the dictionary
+        popd    TOS                     ; restore length
+        andd    TOS, -4                 ; (len / 4)*4 (num bytes with padding, less 4)
+        addd    TOS, 4                  ; now num bytes with padding
+        addd    [var_HERE], TOS         ; increment (HERE) by that much.
+        popd    TOS                     ; drop length (pulls down nt)
+        NEXT
+
+        ; ( "<spaces>name<space>" -- )
+        defword ":",1,,COLON
+        .int    PARSE_NAME, BUILD       ; read a name and make an entry
+        .int    HIDDEN                  ; smudge it
+        .int    LIT
+        jmp     ENTER_PIN               ; LIT will read the encoding of this
+        .p2align 2                      ; plus zero to align it again
+        .int    COMMA                   ; write that instruction into the code field
+        .int    RBRAC, EXIT             ; Enter compilation state and exit
+
+        defword ";",1,F_IMMED,SEMICOLON
+        .int    LIT, EXIT, COMMA        ; compile EXIT to current definition
+        .int    HIDDEN                  ; Un-smudge that definition
+        .int    LBRAC, EXIT             ; switch to interpret state and exit
+
+        ; Switch to interpretation state from compile state. Note F_IMMED.
+        defcode "[",1,F_IMMED,LBRAC
+        movd    [var_STATE], 0
+        NEXT
+
+        ; Switch to compilation state.
+        defcode "]",1,,RBRAC
+        movd    [var_STATE], 1
+        NEXT
+
+        ; ( nt -- xt )
+        defcode "NT>XT",5,,NT_TO_XT
+        addd    TOS, 4                  ; name field
+        movzh   %rh0, [TOS]             ; len -> r0
+        andd    %rd0, -4                ; round length down to multiple of 4
+        lead    TOS, [TOS + 1*%rd0 + 4] ; %rd0+4 is word-aligned length, add into TOS
+        NEXT
+
+/* Control Flow
+
+Just like LIT, control flow operations have a parameter: the target.
+It turns out that all we need to implement all of Forth's control flow primitives
+is an unconditional BRANCH and a conditional branch-on-0 named 0BRANCH. The parameter
+to both will be a 32-bit signed offset, relative to the address of the offset itself.
+
+  +--------+---------+--- - - ---+--------+--------+--- - - ---+----------+
+  | HEADER | jmp %r8 |           | BRANCH | offset | (skipped) | words... |
+  +--------+---------+--- - - ---+--------+-|------+--- - - ---+----------+
+                                            |                    ^
+                                            |                    |
+                                            +---- IP+offset -----+
+
+*/
+
+        defcode "BRANCH",6,,BRANCH
+        add     IP, [IP]                ; read and add offset into IP
+        NEXT
+
+        defcode "0BRANCH",7,,ZBRANCH
+        cmpd    TOS, 0                  ; top of stack is zero?
+        popd    TOS                     ; remove top of stack
+        jz      BRANCH                  ; Yes zero, use BRANCH above.
+        addd    IP, 4                   ; skip offset.
+        NEXT
+
+        ; ( xt -- )
+        ; invoke the given xt
+        defcode "EXECUTE",7,,EXECUTE
+        movd    %rd0, TOS               ; copy xt to %rd0 (calling convention)
+        popd    TOS                     ; drop xt from stack
+        jmp     %rd0                    ; xt's NEXT will continue - we never return here.
+
+        ; Crash the program, signaling failure in a basic way.
+HALT:   movh    %rh15, -1
+        hlt
+
+        ; main interpreter loop
+        ; while (1):
+        ;   cname = PARSE_NAME
+        ;   nt = NT_FIND(cname)
+        ;   if nt:
+        ;     xt = NT>XT(nt)
+        ;     if STATE:
+        ;       COMMA(xt)
+        ;     else:
+        ;       EXECUTE(xt)
+        ;   else:
+        ;     (n,u) = NUMBER(WORD_BUFFER)
+        ;     if u:
+        ;       hlt
+        ;     if STATE:  
+        ;       COMMA(LIT)
+        ;       COMMA(n)
+        ;     else:
+        ;       LIT(n)
+        defword "QUIT",4,,QUIT
+QUITL:  .int PARSE_NAME, NT_FIND        ; parse and lookup name
+        .int QDUP, ZBRANCH, 3f-.        ; didn't find name, branch to number check
+        .int NT_TO_XT
+        .int STATE, FETCH               ; check STATE
+        .int ZBRANCH, 2f-.              ; interpret state, jump fwd
+        .int COMMA, BRANCH, QUITL-.     ; Compile: append xt to current def, then loop
+2:      .int EXECUTE, BRANCH, QUITL-.   ; Interpret: execute xt, then loop.
+3:      .int LIT, WORD_BUFFER, NUMBER   ; try to parse word as a base-10 number
+        .int ZBRANCH, 4f-.              ; Succeeded, go to process lit
+        .int DROP, HALT                 ; not a word or number, crash
+4:      .int STATE, FETCH               ; check STATE
+        .int ZBRANCH, QUITL-.           ; interpret state, n is TOS already, so loop
+        .int LIT, LIT, COMMA            ; Compile LIT into current def
+        .int COMMA, BRANCH, QUITL-.     ; compile num into current def, then loop
+
+        ; this has to stay at the bottom of the file. It gives the initial value for LATEST
+        ; based on the last created dictionary entry (recall that local label 1 is used
+        ; exclusively for tracking the last dicionary entry).
+        .set init_LATEST, 1b-4
