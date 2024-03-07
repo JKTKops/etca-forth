@@ -1002,6 +1002,8 @@ being implemented in assembly in either case.
 
         ; Continuing with functions used to manipulate the dictionary...
         ; * `,` is used in compilation (or any time) to append to the newest entry.
+        ; * `COMPILE` executes the compilation semantics of the name token on the stack.
+        ;       It is placed here for proximity to `,`.
         ; * `HIDDEN` toggles the F_SMUDGE bit on the NT given in TOS.
         ; * `IMMEDIATE` sets the F_IMMED bit on the latest entry. It's itself F_IMMED
         ;       to allow an older Forth style of writing it in the definition instead of after.
@@ -1028,6 +1030,24 @@ _COMMAH: ; use this one if (HERE) is already in rd0
         addd    %rd0, 4                 ; bump value of HERE
         stored  %rd0, var_HERE          ; and save it back
         ret
+
+        ; ( nt -- )
+        ; Compile nt for the current def. If nt is an entry for an immediate
+        ; word, execute that word. Otherwise, append NT>XT(nt) to the current
+        ; definition as with `,`.
+        ; This is placed here for proximity to `,` so that the common jump can
+        ; be short. Placing `EXECUTE` nearby would make them both short, but
+        ; we'll favor code organization just a bit there.
+        defcode "COMPILE",7,,COMPILE
+        addd    TOS, 4                  ; name field
+        movh    %rh0, [TOS]             ; len+flags -> r0
+        movh    %rh1, %rh0              ; len+flags -> r1
+        ; partial inline of NT_TO_XT
+        andh    %rh1, F_LENMASK&-4      ; len -> r1
+        lead    TOS, [TOS + 1*%rd1 + 4] ; xt  -> TOS
+        cmph    %rh0, 0                 ; flags negative? (F_IMMED is 0x80, using test
+        jnn     COMMA                   ;   would be slower on one of the targets.)
+        ljmp    EXECUTE                 ; tail-call correct behavior.
 
         ; ( nt -- )
         defcode "HIDDEN",6,,HIDDEN
@@ -1076,7 +1096,7 @@ _COMMAH: ; use this one if (HERE) is already in rd0
 
         defword ";",1,F_IMMED,SEMICOLON
         .int    LIT, EXIT, COMMA        ; compile EXIT to current definition
-        .int    LATEST, HIDDEN          ; Un-smudge that definition
+        .int    LATEST, FETCH, HIDDEN   ; Un-smudge that definition
         .int    LBRAC, EXIT             ; switch to interpret state and exit
 
         ; Switch to interpretation state from compile state. Note F_IMMED.
@@ -1092,8 +1112,8 @@ _COMMAH: ; use this one if (HERE) is already in rd0
         ; ( nt -- xt )
         defcode ">XT",3,,NT_TO_XT
         addd    TOS, 4                  ; name field
-        movzh   %rh0, [TOS]             ; len -> r0
-        andd    %rd0, -4                ; round length down to multiple of 4
+        movh    %rh0, [TOS]             ; len+flags -> r0
+        andd    %rd0, F_LENMASK&-4      ; len -> r0
         lead    TOS, [TOS + 1*%rd0 + 4] ; %rd0+4 is word-aligned length, add into TOS
         NEXT
 
@@ -1157,11 +1177,11 @@ HALT:   movh    %rh15, -1
         defword "QUIT",4,,QUIT
 QUITL:  .int PARSE_NAME, NT_FIND        ; parse and lookup name
         .int QDUP, ZBRANCH, 3f-.        ; didn't find name, branch to number check
-        .int NT_TO_XT
         .int STATE, FETCH               ; check STATE
         .int ZBRANCH, 2f-.              ; interpret state, jump fwd
-        .int COMMA, BRANCH, QUITL-.     ; Compile: append xt to current def, then loop
-2:      .int EXECUTE, BRANCH, QUITL-.   ; Interpret: execute xt, then loop.
+        .int COMPILE, BRANCH, QUITL-.   ; Compile: we have a word for this. Then loop.
+2:      .int NT_TO_XT, EXECUTE          ; Interpret: execute xt, 
+        .int BRANCH, QUITL-.            ;   then loop.
 3:      .int LIT, WORD_BUFFER, NUMBER   ; try to parse word as a base-10 number
         .int ZBRANCH, 4f-.              ; Succeeded, go to process lit
         .int DROP, HALT                 ; not a word or number, crash
