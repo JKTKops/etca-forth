@@ -1007,8 +1007,8 @@ being implemented in assembly in either case.
         ;       to allow an older Forth style of writing it in the definition instead of after.
         ; * `BUILD` forms a new dictionary entry given a name (without setting the code field).
         ; * `:` uses BUILD to make a new dictionary entry, sets F_SMUDGE, switches
-        ;       to compile mode, and writes `call ENTER_PIN` into the code field.
-        ; * `;` writes EXIT into the current entry, then switches to interpret mode.
+        ;       to compile mode, and writes `jmp ENTER_PIN` into the code field.
+        ; * `;` writes EXIT into the current entry, unsmudges it, then switches to interpret mode.
         ; * The pair of words CREATE and DOES> are significantly more complicated and unlikely
         ;       to be required for bootstrapping with Forth. The actual implementation would
         ;       not be that bad, but the _concept_ is complex. So we'll leave it off for now.
@@ -1021,7 +1021,7 @@ being implemented in assembly in either case.
         popd    TOS                     ; remove x from the stack
         NEXT
 
-        ; append value in TOS to current definition
+        ; append value in TOS to current definition. Clobbers %r0.
 _COMMA: loadd   %rd0, var_HERE          ; movd r,[d] syntax mistakenly selects movsd
 _COMMAH: ; use this one if (HERE) is already in rd0
         movd    [%rd0], TOS
@@ -1043,19 +1043,19 @@ _COMMAH: ; use this one if (HERE) is already in rd0
 
         ; ( c-addr u -- nt )
         defcode "BUILD",5,,BUILD
+        popd    %rd2                    ; c-addr -> r2 stash away briefly
         loadd   %rd0, var_HERE          ; (HERE) -> r0
         addd    %rd0, 3                 ; align up
         andd    %rd0, -4                ;   to 4 bytes
         pushd   %rd0                    ; that's the nt we will return.
-        pushd   TOS                     ; save u
+        pushd   TOS                     ; stash u on the stack for a while
         loadd   TOS, var_LATEST         ; (LATEST) -> TOS
         call    _COMMAH                 ; write link field
         subd    %rd0, 4                 ; pointer to link field
         stored  %rd0, var_LATEST        ; write that to (LATEST)
-        popd    TOS                     ; restore u to arg:"len"
+        movd    TOS, [DSP]              ; retrieve u to arg:"len" but leave it saved on stack
         loadd   %rd1, var_HERE          ; (HERE) -> arg:"dst"
-        popd    %rd0                    ; c-addr -> arg:"src"
-        pushd   TOS                     ; save length
+        movd    %rd0, %rd2              ; c-addr -> arg:"src"
         call    copy_name               ; copy the name into the dictionary
         popd    TOS                     ; restore length
         andd    TOS, -4                 ; (len / 4)*4 (num bytes with padding, less 4)
@@ -1076,7 +1076,7 @@ _COMMAH: ; use this one if (HERE) is already in rd0
 
         defword ";",1,F_IMMED,SEMICOLON
         .int    LIT, EXIT, COMMA        ; compile EXIT to current definition
-        .int    HIDDEN                  ; Un-smudge that definition
+        .int    LATEST, HIDDEN          ; Un-smudge that definition
         .int    LBRAC, EXIT             ; switch to interpret state and exit
 
         ; Switch to interpretation state from compile state. Note F_IMMED.
@@ -1090,7 +1090,7 @@ _COMMAH: ; use this one if (HERE) is already in rd0
         NEXT
 
         ; ( nt -- xt )
-        defcode "NT>XT",5,,NT_TO_XT
+        defcode ">XT",3,,NT_TO_XT
         addd    TOS, 4                  ; name field
         movzh   %rh0, [TOS]             ; len -> r0
         andd    %rd0, -4                ; round length down to multiple of 4
