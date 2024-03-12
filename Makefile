@@ -2,6 +2,8 @@
 EXTENSIONS = INT,PM,MO1,MO2,FI,SAF,BYTE,DW,QW,DWAS,COND,REX,ASP,EXOP,MD
 ARCH_ARG = -march=base+$(EXTENSIONS)
 MODEL = -mcmodel=medany -mpw=d
+# Where should we write files for loading into TC?
+TGTDIR = /mnt/c/Users/zergl/AppData/Roaming/godot/app_userdata/Turing\ Complete/schematics/architecture/ETCA/uETCa-v1/
 
 AS = etca-elf-as $(ARCH_ARG) $(MODEL)
 # The assembler that should be used to produce annotated output. I have a bash script in /usr/local/bin
@@ -13,7 +15,10 @@ CPP = gcc -x assembler-with-cpp -E -P
 forth:	forth.o
 	etca-elf-ld -T linker_script.lds forth.o -o forth
 	etca-elf-objcopy -O binary forth forth.bin
-	cp forth.bin /mnt/c/Users/zergl/AppData/Roaming/godot/app_userdata/Turing\ Complete/schematics/architecture/ETCA/uETCa-v1/
+	cp forth.bin $(TGTDIR)
+
+std: std.fs
+	cp std.fs $(TGTDIR)
 
 # rm forth
 

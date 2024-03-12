@@ -290,8 +290,8 @@ Most users of Forth will tell you that 256 cells is incredibly excessive. But we
 ; we will initialize that to the first cell of upper RAM.
 ; To change where buffers are being allocated, adjust the "ram" section in the linker script.
 .set RETURN_STACK_BOTTOM, 0x400
-.set DATA_STACK_BOTTOM,   0x100 ; 0x800
-.set DICTIONARY_START,    0x80000000
+.set DATA_STACK_BOTTOM,   0x800         ; 0x100 to show in lower RAM
+.set DICTIONARY_START,    0x80000780    ; 0x80000190 for console blank lines then dictionary
 ; linker script is set to start RAM at 0x800.
 
         .text
@@ -322,10 +322,10 @@ Recall the layout of a user-defined word given above (with a bit more precision 
      ^                                                     ^
      |                                                     |
   +--|---+---+---+---+---+---+---+---+---+-----------+---+-|---+---+------+
-  | LINK | 6 | D | O | U | B | L | E | 0 | call %rd8 | 0 | DUP | + | EXIT |
+  | LINK | 6 | D | O | U | B | L | E | 0 | jmp  %rd8 | 0 | DUP | + | EXIT |
   +------+---+---+---+---+---+---+---+---+-----------+---+-----+---+------+
      ^    len                         pad             pad
-     |                              1 byte          2 bytes
+     |                              1 byte          1 bytes
     LINK in next entry
 
 It's useful to define such words in this file, when something would be difficult or too much
@@ -338,7 +338,7 @@ would look like this:
         .byte 6
         .ascii "DOUBLE"
         .byte 0
-DOUBLE: call ENTER_PIN
+DOUBLE: jmp ENTER_PIN
         .p2align 2
         .int DUP
         .int PLUS
@@ -866,7 +866,7 @@ cmp_name:
         .bss
         .p2align 2
 WORD_BUFFER:
-        .space 40
+        .space 128                      ; needs to be long enough for comments!
 
 /* Parsing Input
 
@@ -966,19 +966,29 @@ interrupt, which then busywaits for a keyboard input, or something like that.
         movh    %rh0, [TOS++]           ; *cs-addr++ -> len
         movd    %rd1, 0                 ; 0 -> n
         cmph    %rh0, 0                 ; is len 0?
-        jnz     2f                      ; No, enter loop at top
+        jnz     2f                      ; No, go to sign check
         movh    %rh0, 1                 ; indicate failure
-        jmp     3f                      ; and jump to return code
+        jmp     5f                      ; and jump to return code
+2:      movh    %rh2, [TOS++]           ; Sign check. Read a character...
+        movd    %rd7, 0                 ; negative-no -> r7
+        cmph    %rh2, '-'               ; character is '-'?
+        jne     3f                      ; No, enter loop with that char.
+        subh    %rh0, 1                 ; Yes, consume character. For well-formed code, getting
+                                        ;   here with "-" is not possible since that's in the dict.
+        movd    %rd7, -1                ; negative-yes -> r7, then fallthrough to loop.
 2:      movh    %rh2, [TOS++]           ; next-char -> r2
-        subh    %rh2, '0'               ; next-char <? '0'
-        jb      3f                      ; Yes, we're done.
+3:      subh    %rh2, '0'               ; next-char <? '0'
+        jb      4f                      ; Yes, we're done.
         cmph    %rh2, 9                 ; next-char >? '9'
-        ja      3f                      ; Yes, also done.
+        ja      4f                      ; Yes, also done.
         umulq   %rq1, 10                ; n *= 10
         addd    %rd1, %rd2              ; n += digit
         subh    %rh0, 1                 ; len--
-        jnz     2b                      ; Loop if len is still not 0
-3:      pushd   %rd1                    ; push n
+        jg      2b                      ; Loop if len is still not 0
+4:      cmpd    %rd7, 0                 ; read negative number?
+        je      5f                      ; No, skip negation.
+        rsubd   %rd1, 0                 ; Yes, -n -> n
+5:      pushd   %rd1                    ; push n
         movzh   TOS, %rh0               ; u -> TOS (0 if fallthrough, nonzero if loop exit)
         NEXT
 
@@ -1011,6 +1021,8 @@ being implemented in assembly in either case.
         ; * `:` uses BUILD to make a new dictionary entry, sets F_SMUDGE, switches
         ;       to compile mode, and writes `jmp ENTER_PIN` into the code field.
         ; * `;` writes EXIT into the current entry, unsmudges it, then switches to interpret mode.
+        ; * `[']` compiles code to push the xt of the following word, which cannot be IMMEDIATE.
+        ;       The system halts if it's not found. This is implemented with a hack.
         ; * The pair of words CREATE and DOES> are significantly more complicated and unlikely
         ;       to be required for bootstrapping with Forth. The actual implementation would
         ;       not be that bad, but the _concept_ is complex. So we'll leave it off for now.
@@ -1098,6 +1110,16 @@ _COMMAH: ; use this one if (HERE) is already in rd0
         .int    LIT, EXIT, COMMA        ; compile EXIT to current definition
         .int    LATEST, FETCH, HIDDEN   ; Un-smudge that definition
         .int    LBRAC, EXIT             ; switch to interpret state and exit
+
+        ; ( "<spaces>name<space>" -- )
+        ; Compile code to push the xt of name.
+        ; We use a hack: if we let xt compile normally (i.e. assume it's not immediate),
+        ; then if we just turn `[']'` into `LIT`, it will work as expected. If the Forth code
+        ; wants this to work for immediate words, it is relatively easy to redefine.
+        defcode "[']",3,F_IMMED,BRACKETS_TICK
+        pushd   TOS                     ; push TOS
+        movd    TOS, LIT                ; to make space for addr of LIT
+        ljmp    COMMA                   ; and compile that.
 
         ; Switch to interpretation state from compile state. Note F_IMMED.
         defcode "[",1,F_IMMED,LBRAC
