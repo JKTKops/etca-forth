@@ -1021,12 +1021,18 @@ being implemented in assembly in either case.
         ; * `:` uses BUILD to make a new dictionary entry, sets F_SMUDGE, switches
         ;       to compile mode, and writes `jmp ENTER_PIN` into the code field.
         ; * `;` writes EXIT into the current entry, unsmudges it, then switches to interpret mode.
+        ; * `CREATE` is the first half of a way for users to create some primitive kind of
+        ;       object. It creates a word that pushes the address of its data field on the stack.
+        ;       (no space is allocated to that word, at least not automatically). Immediately
+        ;       after `CREATE name` is invoked, `name` will push the value of `HERE`.
+        ; * `DOES>` is the second half of `CREATE`. `DOES>` is an immediate word. When executed,
+        ;       it terminates the current definition, but with `(DOES>)` instead of `EXIT`.
+        ; * `(DOES>)` is written into words by `DOES>`. When `(DOES>)` executes, the most recently
+        ;       defined word is assumed to have been defined by `CREATE`. That word will be
+        ;       modified to transfer control to the (immediately) following thread after pushing
+        ;       its DFA. See comment CREATE, DOES>, and (DOES>).
         ; * `[']` compiles code to push the xt of the following word, which cannot be IMMEDIATE.
         ;       The system halts if it's not found. This is implemented with a hack.
-        ; * The pair of words CREATE and DOES> are significantly more complicated and unlikely
-        ;       to be required for bootstrapping with Forth. The actual implementation would
-        ;       not be that bad, but the _concept_ is complex. So we'll leave it off for now.
-        ;       (actually, they might be very useful for implementing a language. hmm.)
 
         ; ( x -- )
         ; Write x to HERE and bump it.
@@ -1110,6 +1116,103 @@ _COMMAH: ; use this one if (HERE) is already in rd0
         .int    LIT, EXIT, COMMA        ; compile EXIT to current definition
         .int    LATEST, FETCH, HIDDEN   ; Un-smudge that definition
         .int    LBRAC, EXIT             ; switch to interpret state and exit
+
+/* CREATE, DOES>, and (DOES>)
+
+The function of these words is notoriously complicated and deserves some more ASCII art.
+
+There are several ways to implement these words and the one we use here is tuned to the
+details of our Forth (DTC, TOS-in-register, etc.).
+
+`CREATE`d words look like this:
+   +------+-----+----------+---+----------+-----+------+----------+------+
+   | LINK | F+L | ..name.. | 0 | push TOS | nop | ljmp | (CREATE) | STUB |
+   +------+-----+----------+---+----------+-----+------+----------+------+
+                   padding---^      |     |     |      |          |
+                   2 byte push------^     |     |      |          |
+                   1 byte nop-------------^     |      |          |
+                   1 byte ljmp header-----------^      |          |
+                   4-byte address of DODOES------------^- `` STUB-^
+
+The `ljmp` transfers control to `(CREATE)`, which will complete the pushing of the DFA,
+(which will always be r0+12), then pushes the current IP on the rstack, changes the IP
+to the value of [r0+8], and then runs NEXT. This has the effect of transferring control
+to the thread which begins at the address given in the field labeled `STUB` above.
+It is so named because it initially points to the "stub" thread, which only contains
+`EXIT`.
+
+Consider a definition like `: CONSTANT RESERVE DOES> @ ;`.
+For simplicity, imagine that the word `RESERVE` allocates the next cell
+(that is, increments HERE by one cell and returns a pointer to the allocated cell),
+and then writes the value on top of the stack into that cell.
+   +------+---+----------+---+-----------+---------+---------+---+------+
+   | LINK | 8 | CONSTANT | 0 | jmp ENTER | RESERVE | (DOES>) | @ | EXIT |
+   +------+---+----------+---+-----------+---------+---------+---+------+
+                                                                ^-<
+After executing `2 CONSTANT DEUX`, we'll get the following entry: |
+    +------+---+------+---+----------+-----+------+----------+----|-+---+
+    | LINK | 4 | DEUX | 0 | push TOS | nop | ljmp | (CREATE) | ADDR | 2 |
+    +------+---+------+---+----------+-----+------+----------+------+---+
+
+When `DEUX` gets executed, TOS is pushed onto the stack in RAM, then DODOES
+puts the address of that cell containing 2 into TOS. DODOES then saves IP
+on the return stack, and sets IP to ADDR (which points at the `@` following
+the thread of `CONSTANT` itself). Then we run NEXT, so the thread `@ EXIT` will execute,
+and we will be left with the value 2 on the stack and continuing execution from wherever
+`DEUX` was called.
+
+Note that `(DOES>)`, in addition to mutating the most recent definition, also exits the
+current thread. So when `CONSTANT` is executed, the `@ EXIT` portion of its thread never
+runs. That portion of the thread is only run by the words that `CONSTANT` _creates_.
+Hence the name `DOES>` ! Its very shape indicates what happens. The created thing will
+do whatever follows.
+
+(naming note: labels can't have parens, so DODOES is (DOES>) and DOCREATE is (CREATE)).
+
+*/
+
+        ; ( "<spaces>name<space>" -- )
+        defword "CREATE",6,,CREATE
+        .int PARSE_NAME, BUILD, LIT
+        pushd TOS
+        nop
+        .byte 0xf6                      ; byte header of ljmp.abs
+        .int COMMA
+        .int LIT, DOCREATE, COMMA
+        .int LIT, STUB, COMMA
+        .int EXIT
+
+        ; No alignment needed.
+DOCREATE:
+        movd    TOS, 12
+        addd    TOS, %rd0               ; DFA = CFA + 12
+        PUSHRSP IP                      ; push IP of calling thread
+        movd    IP, [%rd0+8]            ; load IP of DOES> thread (initially STUB)
+        NEXT                            ; transfer control.
+
+        .p2align 1
+STUB:   .int EXIT
+
+        ; ( -- )
+        ; Compile DODOES into the current definition. This is its own immediate
+        ; word, rather than just having DODOES be the non-immediate implementation
+        ; of DOES>, in case a future modification to the system makes it so that
+        ; DOES> has to actually do something. Also, being immediate is part of the spec.
+        defword "DOES>",5,F_IMMED,DOES
+        .int LIT, DODOES, COMMA, EXIT
+
+        ; ( -- )
+        ; Assume the latest definition was made with `CREATE` and modify it to transfer
+        ; control to immediately after this word instead of to STUB (or wherever else).
+        ; Then exit the thread that called this one by going to its return address.
+DODOES: jmp     ENTER_PIN               ; we want to write this in Forth for simplicity
+        .p2align 2
+        .int FROM_R                     ; Our return address is the actual target,
+                                        ;   and by popping it, we also act like EXIT.
+        .int LATEST, FETCH, NT_TO_XT    ; CFA of latest definition
+        .int LIT, 8, PLUS               ; transfer target field address
+        .int STORE                      ; our return address -> (CFA+8)
+        .int EXIT                       ; Return from the thread that called DODOES.
 
         ; ( "<spaces>name<space>" -- )
         ; Compile code to push the xt of name.

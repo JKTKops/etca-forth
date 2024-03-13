@@ -147,5 +147,12 @@ VARIABLE CON-COL 0 CON-COL !
 \ Compile code to print the ("-terminated) string after this word.
 : ." [COMPILE] S" ['] TYPE , ; IMMEDIATE
 
-: HELLO-WORLD ." Hello, world!" ;
-HELLO-WORLD
+: TABLE CREATE ALLOT DOES> + ;
+3 TABLE ARRAY
+48 0 ARRAY C!
+49 1 ARRAY C!
+50 2 ARRAY C!
+
+0 ARRAY C@ EMIT
+1 ARRAY C@ EMIT
+2 ARRAY C@ EMIT
